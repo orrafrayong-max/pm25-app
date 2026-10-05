@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>คุณภาพอากาศ PM2.5</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="PM2.5">
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--fg:#14202b;--mut:#5b6b7a;--line:#dde3e9}
+@media(prefers-color-scheme:dark){:root{--bg:#10171d;--card:#18222b;--fg:#e8eef3;--mut:#9aabb9;--line:#2a3743}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,"Noto Sans Thai",Sarabun,sans-serif;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+main{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:1.3rem;margin:0}
+h2{font-size:1rem;margin:20px 0 8px;color:var(--mut)}
+.sub,.note{color:var(--mut);font-size:.85rem}
+.bar{display:flex;gap:8px;margin:14px 0}
+input,button{font:inherit;border-radius:10px;border:1px solid var(--line);padding:10px 12px;background:var(--card);color:var(--fg)}
+input{flex:1;min-width:0}
+button{cursor:pointer}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:10px;display:flex;gap:12px;align-items:center}
+.card.old{opacity:.75}
+.badge{min-width:70px;text-align:center;border-radius:12px;padding:8px 6px;font-weight:700}
+.badge small{display:block;font-weight:600;font-size:.7rem;line-height:1.2}
+.info{flex:1;min-width:0}
+.name{font-weight:600;overflow-wrap:anywhere}
+.meta{font-size:.82rem;color:var(--mut)}
+.warn{color:#b45309;font-weight:600}
+.star{border:0;background:none;font-size:1.4rem;padding:4px}
+.msg{padding:10px 12px;border-radius:10px;background:var(--card);border:1px solid var(--line);margin:10px 0;font-size:.9rem}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>คุณภาพอากาศ PM2.5</h1>
+<div class="sub" id="upd">กำลังโหลด…</div>
+<div class="msg" id="ios" hidden>iPhone: แตะปุ่มแชร์ใน Safari แล้วเลือก "เพิ่มลงหน้าจอโฮม" เพื่อติดตั้งแอป</div>
+<div class="bar">
+<button id="loc">📍 ใกล้ฉัน</button>
+<input id="q" type="search" placeholder="ค้นหาชื่อสถานี / พื้นที่" aria-label="ค้นหาสถานี">
+<button id="inst" hidden>ติดตั้ง</button>
+</div>
+<div class="msg" id="err" hidden></div>
+<div id="fav"></div><div id="near"></div><div id="res"></div>
+<p class="note">ข้อมูล: กรมควบคุมมลพิษ (Air4Thai) · ค่า PM2.5 เป็นค่าเฉลี่ย 24 ชั่วโมง ซึ่งตอบสนองช้ากว่าค่ารายชั่วโมง · ข้อมูลอาจล่าช้าหรือขาดหาย และไม่ใช่คำแนะนำทางการแพทย์</p>
+</main>
+<script>
+const SB='https://tkjwvwucjxvagdwdbyvx.supabase.co';
+const KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRrand2d3Vjanh2YWdkd2RieXZ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5Mjk5ODAsImV4cCI6MjEwNjUwNTk4MH0.oMdDiK3KcXjX0m9Ud_A0ZIGwaBPKkEJr5_7ASnbzh7Q'; // public anon key (read-only via RLS)
+const STALE_H=3; // readings older than this are shown as "old" and never coloured
+// [max AQI, label, background, text]. Bands above 100 are not yet verified against an official source.
+const BANDS=[[25,'ดีมาก','#3bc9ff','#111'],[50,'ดี','#92d050','#111'],[100,'ปานกลาง','#ffeb3b','#111'],[200,'เริ่มมีผลกระทบต่อสุขภาพ','#ff9800','#111'],[1e9,'มีผลกระทบต่อสุขภาพ','#e53935','#fff']];
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let S=[],loc=null,favs=[];
+try{favs=JSON.parse(localStorage.getItem('pm25.fav')||'[]')}catch(e){}
+const saveFavs=()=>{try{localStorage.setItem('pm25.fav',JSON.stringify(favs))}catch(e){}};
+const get=p=>fetch(SB+'/rest/v1/'+p,{headers:{apikey:KEY,Authorization:'Bearer '+KEY}}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json()});
+const fmt=d=>new Intl.DateTimeFormat('th-TH',{timeZone:'Asia/Bangkok',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(d);
+const ago=ms=>{const m=Math.max(0,Math.round(ms/6e4));if(m<60)return m+' นาทีที่แล้ว';const h=Math.round(m/60);if(h<48)return h+' ชม.ที่แล้ว';return Math.round(h/24)+' วันที่แล้ว'};
+const km=(a,b,c,d)=>{const r=x=>x*Math.PI/180,h=Math.sin(r(c-a)/2)**2+Math.cos(r(a))*Math.cos(r(c))*Math.sin(r(d-b)/2)**2;return 12742*Math.asin(Math.sqrt(h))};
+const showErr=t=>{const e=$('err');e.textContent=t;e.hidden=false};
+
+function card(s,extra){
+  const r=s.r,t=r?new Date(r.observed_at):null,age=t?Date.now()-t:0,old=!!t&&age>STALE_H*36e5;
+  let badge;
+  if(!r||r.pm25_aqi==null) badge='<div class="badge" style="background:#9aa5b1;color:#111">–<small>ไม่มีข้อมูล</small></div>';
+  else if(old) badge='<div class="badge" style="background:#9aa5b1;color:#111">'+r.pm25_aqi+'<small>AQI (ข้อมูลเก่า)</small></div>';
+  else{const b=BANDS.find(x=>r.pm25_aqi<=x[0]);badge='<div class="badge" style="background:'+b[2]+';color:'+b[3]+'">'+r.pm25_aqi+'<small>'+b[1]+'</small></div>'}
+  const val=r&&r.pm25_avg24h!=null?'PM2.5 '+r.pm25_avg24h+' µg/m³ (เฉลี่ย 24 ชม.)':'';
+  const when=t?'<span class="'+(old?'warn':'')+'">'+(old?'ข้อมูลเก่า · ':'')+fmt(t)+' · '+ago(age)+'</span>':'';
+  return '<div class="card'+(old?' old':'')+'">'+badge+'<div class="info"><div class="name">'+esc((s.name_th||'').trim())+'</div><div class="meta">'+esc((s.area_th||'').trim())+(extra?' · '+esc(extra):'')+'</div><div class="meta">'+val+'</div><div class="meta">'+when+'</div></div><button class="star" data-id="'+esc(s.station_id)+'" aria-label="บันทึกสถานี">'+(favs.includes(s.station_id)?'★':'☆')+'</button></div>';
+}
+function list(id,title,arr,extra){$(id).innerHTML=arr.length?'<h2>'+title+'</h2>'+arr.map(s=>card(s,extra&&extra(s))).join(''):''}
+
+function render(){
+  const q=$('q').value.trim().toLowerCase();
+  list('fav','สถานีของฉัน',favs.map(i=>S.find(s=>s.station_id===i)).filter(Boolean));
+  if(loc){
+    S.forEach(s=>{s.d=s.lat!=null&&s.lon!=null?km(loc.lat,loc.lon,s.lat,s.lon):null});
+    const n=S.filter(s=>s.station_type!=='MOBILE'&&s.r&&s.d!=null).sort((a,b)=>a.d-b.d).slice(0,3);
+    list('near','ใกล้ฉัน (สถานีที่มีข้อมูลและอยู่ใกล้ที่สุด)',n,s=>s.d.toFixed(1)+' กม.');
+  }else $('near').innerHTML='';
+  if(q){
+    const m=S.filter(s=>[s.name_th,s.name_en,s.area_th].some(v=>(v||'').toLowerCase().includes(q)));
+    list('res','ผลค้นหา ('+m.length+(m.length>30?', แสดง 30 รายการแรก':'')+')',m.slice(0,30),s=>s.d!=null&&loc?s.d.toFixed(1)+' กม.':'');
+  }else $('res').innerHTML='<p class="note">พิมพ์ชื่อสถานีหรือพื้นที่เพื่อค้นหา หรือกด "ใกล้ฉัน" แล้วกด ☆ เพื่อบันทึกสถานีของคุณ</p>';
+}
+
+async function load(){
+  let st,lt,cachedAt=0;
+  try{
+    [st,lt]=await Promise.all([
+      get('stations?select=station_id,name_th,name_en,area_th,lat,lon,station_type&limit=1000'),
+      get('station_latest?select=station_id,observed_at,pm25_avg24h,pm25_aqi&limit=1000')]);
+    try{localStorage.setItem('pm25.cache',JSON.stringify({t:Date.now(),st,lt}))}catch(e){}
+    $('err').hidden=true;
+  }catch(e){
+    try{const c=JSON.parse(localStorage.getItem('pm25.cache'));if(!c)throw e;st=c.st;lt=c.lt;cachedAt=c.t;
+      showErr('ดึงข้อมูลใหม่ไม่สำเร็จ แสดงข้อมูลที่เก็บไว้เมื่อ '+fmt(new Date(cachedAt)))}
+    catch(_){showErr('โหลดข้อมูลไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่');$('upd').textContent='ไม่มีข้อมูล';return}
+  }
+  const m=new Map(lt.map(r=>[r.station_id,r]));
+  S=st.map(s=>Object.assign({},s,{r:m.get(s.station_id)||null,d:null}));
+  const newest=lt.length?Math.max.apply(null,lt.map(r=>+new Date(r.observed_at))):0;
+  const stale=!newest||Date.now()-newest>STALE_H*36e5;
+  $('upd').className='sub'+(stale?' warn':'');
+  $('upd').textContent=newest?(stale?'ข้อมูลทั้งระบบเก่า · ':'')+'ค่าล่าสุดของระบบ: '+fmt(new Date(newest))+' ('+ago(Date.now()-newest)+')':'ยังไม่มีข้อมูล';
+  render();
+}
+
+$('q').addEventListener('input',render);
+$('loc').addEventListener('click',()=>{
+  if(!navigator.geolocation){showErr('อุปกรณ์นี้ไม่รองรับการระบุตำแหน่ง ลองค้นหาจากชื่อสถานี');return}
+  navigator.geolocation.getCurrentPosition(
+    p=>{loc={lat:p.coords.latitude,lon:p.coords.longitude};render()},
+    ()=>showErr('ระบุตำแหน่งไม่ได้ กรุณาอนุญาตการเข้าถึงตำแหน่ง หรือค้นหาจากชื่อสถานี'),
+    {timeout:10000,maximumAge:300000});
+});
+document.addEventListener('click',e=>{
+  const b=e.target.closest('.star');if(!b)return;
+  const id=b.dataset.id,i=favs.indexOf(id);
+  if(i>=0)favs.splice(i,1);else favs.push(id);
+  saveFavs();render();
+});
+let dp;
+addEventListener('beforeinstallprompt',e=>{e.preventDefault();dp=e;$('inst').hidden=false});
+$('inst').addEventListener('click',async()=>{if(!dp)return;dp.prompt();await dp.userChoice;dp=null;$('inst').hidden=true});
+if(/iphone|ipad|ipod/i.test(navigator.userAgent)&&!navigator.standalone)$('ios').hidden=false;
+if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')load()});
+setInterval(load,10*60*1000);
+load();
+</script>
+</body>
+</html>
